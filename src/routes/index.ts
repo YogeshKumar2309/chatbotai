@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { letterRoutes } from "../features/letter";
-import { chatRoutes } from "@/features/chat";
+import { chatRoutes } from "../features/chat";
 
 const router = Router();
 
