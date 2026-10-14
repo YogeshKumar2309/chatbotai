@@ -8,17 +8,14 @@ import { Unanswered } from "./unanswered.model";
 import { ApiError } from "../../core";
 
 /* ------------------------------------------------------------------ */
-/* Config — 3 Tier matching                                            */
+/* Config                                                              */
 /* ------------------------------------------------------------------ */
 
-const MATCH_LEVELS = [1.0, 0.5, 0.2]; // 100%, 50%, 20%
+const MATCH_LEVELS = [1.0, 0.5, 0.2];
 const HISTORY_LIMIT = 5;
-const DEFAULT_MOOD = "b";
-
-// ⭐ Mood fallback order — agar requested mood nahi mile to ye try karo
+const DEFAULT_MOOD = "a";
 const MOOD_FALLBACK_ORDER = ["a", "b", "c", "d", "e", "g", "f"];
 
-// Fallback messages — user ko engage rakhne ke liye
 const FALLBACK_MESSAGES = [
   "dobara bolo mujhe samajh nahi aaya",
   "phir se bolo na samajh nahi aaya",
@@ -108,10 +105,10 @@ function anyTokenMatch(questionWords: number[], pattern: any): number {
 }
 
 /* ------------------------------------------------------------------ */
-/* Find cached answer — 3 tiers + any-token + ⭐ mood fallback         */
+/* ⭐ Find cached answer — koi bhi mood (cache-first check)            */
 /* ------------------------------------------------------------------ */
 
-async function findCachedAnswer(questionWords: number[], mood: string) {
+async function findCachedAnswerAnyMood(questionWords: number[]) {
   if (!questionWords.length) return null;
 
   const patterns = await ChatPattern.find()
@@ -119,13 +116,6 @@ async function findCachedAnswer(questionWords: number[], mood: string) {
     .limit(1000)
     .lean();
 
-  // ⭐ Mood priority: requested mood pehle, phir baaki
-  const moodPriority = [
-    mood,
-    ...MOOD_FALLBACK_ORDER.filter((m) => m !== mood),
-  ];
-
-  // Tier 1, 2, 3: 100% → 50% → 20%
   for (const threshold of MATCH_LEVELS) {
     let best: {
       pattern: any;
@@ -147,10 +137,9 @@ async function findCachedAnswer(questionWords: number[], mood: string) {
       }
       if (bestQ < threshold) continue;
 
-      // ⭐ Mood priority se answer dhundho
       let foundAnswer: any = null;
-      let actualMood = mood;
-      for (const m of moodPriority) {
+      let actualMood = "a";
+      for (const m of MOOD_FALLBACK_ORDER) {
         const ans = p.answers.find((a: any) => a.type === m);
         if (ans) {
           foundAnswer = ans;
@@ -161,45 +150,22 @@ async function findCachedAnswer(questionWords: number[], mood: string) {
       if (!foundAnswer) continue;
 
       if (!best || bestQ > best.score) {
-        best = {
-          pattern: p,
-          answer: foundAnswer,
-          qIndex,
-          score: bestQ,
-          actualMood,
-        };
+        best = { pattern: p, answer: foundAnswer, qIndex, score: bestQ, actualMood };
       }
     }
 
-    if (best) {
-      if (best.actualMood !== mood) {
-        console.log(
-          `✅ Match at tier ${Math.round(threshold * 100)}% — mood ${mood}→${best.actualMood}`
-        );
-      } else {
-        console.log(`✅ Match at tier ${Math.round(threshold * 100)}%`);
-      }
-      return best;
-    }
+    if (best) return best;
   }
 
-  // Tier 4: Koi bhi token kahin bhi
-  let fallback: {
-    pattern: any;
-    answer: any;
-    qIndex: number;
-    score: number;
-    actualMood: string;
-  } | null = null;
-
+  // Tier 4: any token anywhere
+  let fallback: any = null;
   for (const p of patterns) {
     const score = anyTokenMatch(questionWords, p);
     if (score < 0.2) continue;
 
-    // ⭐ Mood priority
     let foundAnswer: any = null;
-    let actualMood = mood;
-    for (const m of moodPriority) {
+    let actualMood = "a";
+    for (const m of MOOD_FALLBACK_ORDER) {
       const ans = p.answers.find((a: any) => a.type === m);
       if (ans) {
         foundAnswer = ans;
@@ -221,21 +187,73 @@ async function findCachedAnswer(questionWords: number[], mood: string) {
           bestQIdx = i;
         }
       }
-      fallback = {
-        pattern: p,
-        answer: foundAnswer,
-        qIndex: bestQIdx,
-        score,
-        actualMood,
-      };
+      fallback = { pattern: p, answer: foundAnswer, qIndex: bestQIdx, score, actualMood };
     }
   }
 
-  if (fallback) {
-    console.log(
-      `⚠️ Fallback token match (${Math.round(fallback.score * 100)}%) mood ${mood}→${fallback.actualMood}`
-    );
-    return fallback;
+  return fallback;
+}
+
+/* ------------------------------------------------------------------ */
+/* Find cached answer — specific mood + fallback                       */
+/* ------------------------------------------------------------------ */
+
+async function findCachedAnswer(questionWords: number[], mood: string) {
+  if (!questionWords.length) return null;
+
+  const patterns = await ChatPattern.find()
+    .sort({ totalCount: -1, matchCount: -1 })
+    .limit(1000)
+    .lean();
+
+  const moodPriority = [mood, ...MOOD_FALLBACK_ORDER.filter((m) => m !== mood)];
+
+  for (const threshold of MATCH_LEVELS) {
+    let best: {
+      pattern: any;
+      answer: any;
+      qIndex: number;
+      score: number;
+      actualMood: string;
+    } | null = null;
+
+    for (const p of patterns) {
+      let bestQ = 0;
+      let qIndex = -1;
+      for (let i = 0; i < p.questions.length; i++) {
+        const s = calculateMatch(questionWords, p.questions[i].words);
+        if (s > bestQ) {
+          bestQ = s;
+          qIndex = i;
+        }
+      }
+      if (bestQ < threshold) continue;
+
+      let foundAnswer: any = null;
+      let actualMood = mood;
+      for (const m of moodPriority) {
+        const ans = p.answers.find((a: any) => a.type === m);
+        if (ans) {
+          foundAnswer = ans;
+          actualMood = m;
+          break;
+        }
+      }
+      if (!foundAnswer) continue;
+
+      if (!best || bestQ > best.score) {
+        best = { pattern: p, answer: foundAnswer, qIndex, score: bestQ, actualMood };
+      }
+    }
+
+    if (best) {
+      if (best.actualMood !== mood) {
+        console.log(`✅ Match tier ${Math.round(threshold * 100)}% — mood ${mood}→${best.actualMood}`);
+      } else {
+        console.log(`✅ Match tier ${Math.round(threshold * 100)}%`);
+      }
+      return best;
+    }
   }
 
   return null;
@@ -271,18 +289,13 @@ async function savePattern(
       (q: any) => q.text.toLowerCase() === questionText.toLowerCase()
     );
     if (!qExists) {
-      existing.questions.push({
-        words: questionWords,
-        text: questionText,
-        count: 1,
-      });
+      existing.questions.push({ words: questionWords, text: questionText, count: 1 });
     }
 
     const ansIdx = existing.answers.findIndex((a: any) => a.type === mood);
     if (ansIdx >= 0) {
       existing.answers[ansIdx].count = (existing.answers[ansIdx].count || 0) + 1;
-      existing.answers[ansIdx].hitCount =
-        (existing.answers[ansIdx].hitCount || 0) + 1;
+      existing.answers[ansIdx].hitCount = (existing.answers[ansIdx].hitCount || 0) + 1;
     } else {
       existing.answers.push({
         type: mood,
@@ -296,25 +309,14 @@ async function savePattern(
     await ChatPattern.updateOne(
       { _id: existing._id },
       {
-        $set: {
-          questions: existing.questions,
-          answers: existing.answers,
-        },
+        $set: { questions: existing.questions, answers: existing.answers },
         $inc: { matchCount: 1, totalCount: 1 },
       }
     );
   } else {
     await ChatPattern.create({
       questions: [{ words: questionWords, text: questionText, count: 1 }],
-      answers: [
-        {
-          type: mood,
-          words: answerWords,
-          text: answerText,
-          hitCount: 0,
-          count: 1,
-        },
-      ],
+      answers: [{ type: mood, words: answerWords, text: answerText, hitCount: 0, count: 1 }],
       matchCount: 0,
       totalCount: 1,
     });
@@ -322,13 +324,10 @@ async function savePattern(
 }
 
 /* ------------------------------------------------------------------ */
-/* Save unanswered (numbers only)                                      */
+/* Save unanswered                                                     */
 /* ------------------------------------------------------------------ */
 
-async function saveUnanswered(
-  questionWords: number[],
-  mood: string
-): Promise<void> {
+async function saveUnanswered(questionWords: number[], mood: string): Promise<void> {
   if (!questionWords.length) return;
   const questionKey = questionWords.join(",");
 
@@ -337,11 +336,7 @@ async function saveUnanswered(
     {
       $inc: { count: 1 },
       $set: { lastSeen: new Date(), mood },
-      $setOnInsert: {
-        questionKey,
-        questionWords,
-        firstSeen: new Date(),
-      },
+      $setOnInsert: { questionKey, questionWords, firstSeen: new Date() },
     },
     { upsert: true }
   );
@@ -350,7 +345,7 @@ async function saveUnanswered(
 }
 
 /* ------------------------------------------------------------------ */
-/* Ask AI — STRICT PROMPT                                              */
+/* Ask AI                                                              */
 /* ------------------------------------------------------------------ */
 
 async function askAI(
@@ -385,7 +380,7 @@ Tumhara reply (sirf ye):`;
 }
 
 /* ------------------------------------------------------------------ */
-/* Random fallback message                                             */
+/* Random fallback                                                     */
 /* ------------------------------------------------------------------ */
 
 function getRandomFallback(): string {
@@ -393,7 +388,7 @@ function getRandomFallback(): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* Main handler                                                        */
+/* Main handler — ⭐ CACHE FIRST, MOOD BAAD ME                         */
 /* ------------------------------------------------------------------ */
 
 interface HandleOptions {
@@ -410,22 +405,17 @@ export const chatService = {
     const { userId } = options;
     const uniqueId = (options.uniqueId || "default").toLowerCase();
 
-    // 1️⃣ Mood detect
-    const mood = await detectMood(userId, uniqueId);
-    console.log(`🎭 Mood: ${mood}`);
-
-    // 2️⃣ Encode + naye words add
+    // 1️⃣ Encode + naye words add (default mood)
     const firstPass = await encoder.encode(text);
     for (const w of firstPass.missingWords) {
-      await encoder.addWord(w, mood);
+      await encoder.addWord(w, DEFAULT_MOOD);
     }
     const enc = await encoder.encode(text);
     const questionWords = enc.foundKeys;
 
-    // ⭐ Question words ka count increment
     await encoder.incrementCounts(questionWords);
 
-    // 3️⃣ Save user msg
+    // 2️⃣ Save user msg
     await UserChat.create({
       userId: new Types.ObjectId(userId),
       uniqueId,
@@ -434,54 +424,104 @@ export const chatService = {
       text,
     });
 
-    // 4️⃣ Search cache — 3 tiers + ⭐ mood fallback
-    const cached = await findCachedAnswer(questionWords, mood);
-    if (cached) {
-      const actualMood = cached.actualMood || mood;
+    // 3️⃣ ⭐ CACHE CHECK PEHLE — koi bhi mood
+    const cachedAny = await findCachedAnswerAnyMood(questionWords);
+    if (cachedAny) {
       console.log(
-        `✅ Cache hit ${Math.round(cached.score * 100)}% mood=${mood}→${actualMood}`
+        `✅ Cache hit (any mood) ${Math.round(cachedAny.score * 100)}% mood=${cachedAny.actualMood}`
       );
 
-      const ansIdx = cached.pattern.answers.findIndex(
-        (a: any) => a.type === actualMood
+      const ansIdx = cachedAny.pattern.answers.findIndex(
+        (a: any) => a.type === cachedAny.actualMood
       );
 
       if (ansIdx >= 0) {
         await ChatPattern.updateOne(
-          { _id: cached.pattern._id },
+          { _id: cachedAny.pattern._id },
           {
             $inc: {
               matchCount: 1,
               totalCount: 1,
               [`answers.${ansIdx}.hitCount`]: 1,
               [`answers.${ansIdx}.count`]: 1,
-              [`questions.${cached.qIndex}.count`]: 1,
+              [`questions.${cachedAny.qIndex}.count`]: 1,
             },
           }
         );
       }
 
-      await encoder.incrementCounts(cached.answer.words);
+      await encoder.incrementCounts(cachedAny.answer.words);
 
       await UserChat.create({
         userId: new Types.ObjectId(userId),
         uniqueId,
         role: "assistant",
-        words: cached.answer.words,
-        text: cached.answer.text,
+        words: cachedAny.answer.words,
+        text: cachedAny.answer.text,
+        mood: cachedAny.actualMood,
+      });
+
+      return {
+        reply: cachedAny.answer.text,
+        replyWords: cachedAny.answer.words,
+        source: "cache",
+        mood: cachedAny.actualMood,
+        matchScore: cachedAny.score,
+      };
+    }
+
+    // 4️⃣ Cache miss — AB mood detect karo
+    const mood = await detectMood(userId, uniqueId);
+    console.log(`🎭 Mood: ${mood} (cache miss)`);
+
+    // 5️⃣ Mood ke saath dobara try
+    const cachedMood = await findCachedAnswer(questionWords, mood);
+    if (cachedMood) {
+      const actualMood = cachedMood.actualMood || mood;
+      console.log(
+        `✅ Cache hit ${Math.round(cachedMood.score * 100)}% mood=${mood}→${actualMood}`
+      );
+
+      const ansIdx = cachedMood.pattern.answers.findIndex(
+        (a: any) => a.type === actualMood
+      );
+
+      if (ansIdx >= 0) {
+        await ChatPattern.updateOne(
+          { _id: cachedMood.pattern._id },
+          {
+            $inc: {
+              matchCount: 1,
+              totalCount: 1,
+              [`answers.${ansIdx}.hitCount`]: 1,
+              [`answers.${ansIdx}.count`]: 1,
+              [`questions.${cachedMood.qIndex}.count`]: 1,
+            },
+          }
+        );
+      }
+
+      await encoder.incrementCounts(cachedMood.answer.words);
+
+      await UserChat.create({
+        userId: new Types.ObjectId(userId),
+        uniqueId,
+        role: "assistant",
+        words: cachedMood.answer.words,
+        text: cachedMood.answer.text,
         mood: actualMood,
       });
 
       return {
-        reply: cached.answer.text,
-        replyWords: cached.answer.words,
+        reply: cachedMood.answer.text,
+        replyWords: cachedMood.answer.words,
         source: "cache",
         mood: actualMood,
-        matchScore: cached.score,
+        matchScore: cachedMood.score,
       };
     }
 
-    // 5️⃣ AI se pucho
+    // 6️⃣ AI se pucho
     let aiReply: string;
     let aiSuccess = true;
     try {
@@ -500,12 +540,12 @@ export const chatService = {
       /evaluat|thinking|check|consider|\*\*|rules?:|against/i.test(aiReply);
 
     if (isGarbage) {
-      console.log(`⚠️ Garbage reply: "${aiReply.slice(0, 60)}"`);
+      console.log(`⚠️ Garbage: "${aiReply.slice(0, 60)}"`);
       aiSuccess = false;
       aiReply = getRandomFallback();
     }
 
-    // 6️⃣ Encode reply + naye words
+    // 7️⃣ Encode reply
     const firstPassReply = await encoder.encode(aiReply);
     for (const w of firstPassReply.missingWords) {
       await encoder.addWord(w, mood);
@@ -515,14 +555,14 @@ export const chatService = {
 
     await encoder.incrementCounts(replyWords);
 
-    // 7️⃣ Save pattern ya unanswered
+    // 8️⃣ Save pattern / unanswered
     if (aiSuccess) {
       await savePattern(questionWords, text, mood, replyWords, aiReply);
     } else {
       await saveUnanswered(questionWords, mood);
     }
 
-    // 8️⃣ Save assistant msg
+    // 9️⃣ Save assistant msg
     await UserChat.create({
       userId: new Types.ObjectId(userId),
       uniqueId,
