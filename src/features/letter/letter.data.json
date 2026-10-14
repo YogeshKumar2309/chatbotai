@@ -9891,15 +9891,5 @@
  "9890": "varieties",
  "9891": "arbor",
  "9892": "mediawiki",
- "9893": "configurations",
- "9894": "poison",
- 
-
-{
-  "key": 35,
-  "value": "apple",
-  "definition": "A round fruit...",
-  "synonyms": ["fruit"],
-  "cefr": "A1"
-}
+ "9893": "configurations"
 }
